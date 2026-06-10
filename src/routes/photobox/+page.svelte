@@ -5,8 +5,25 @@
 	type SignaturePosition = 'left' | 'center' | 'right';
 	type SignatureColor = 'cream' | 'pink' | 'dark';
 	type FacingMode = 'user' | 'environment';
+	type FrameFormat = 'landscape' | 'portrait';
 
-	const frameUrl = '/assets/camboxframe1.png';
+	const frames: Record<
+		FrameFormat,
+		{ label: string; url: string; width: number; height: number }
+	> = {
+		landscape: {
+			label: 'Landscape',
+			url: '/assets/camboxframe1.png',
+			width: 1134,
+			height: 660
+		},
+		portrait: {
+			label: 'Portrait',
+			url: '/assets/camboxframe1vertical.png',
+			width: 1080,
+			height: 1920
+		}
+	};
 	const filters: Array<{ id: FilterId; label: string; css: string }> = [
 		{ id: 'natural', label: 'Natural', css: 'none' },
 		{ id: 'warm', label: 'Warm', css: 'sepia(0.22) saturate(1.18) contrast(1.04)' },
@@ -34,11 +51,13 @@
 	let mirrorPhoto = $state(true);
 	let timerSeconds = $state(3);
 	let countdown = $state(0);
+	let frameFormat = $state<FrameFormat>('landscape');
 	let signature = $state('');
 	let signaturePosition = $state<SignaturePosition>('center');
 	let signatureColor = $state<SignatureColor>('cream');
 
 	let activeFilter = $derived(filters.find((filter) => filter.id === selectedFilter) ?? filters[0]);
+	let activeFrame = $derived(frames[frameFormat]);
 	let previewFilter = $derived(
 		`${activeFilter.css === 'none' ? '' : activeFilter.css} brightness(${brightness}%)`.trim()
 	);
@@ -180,8 +199,7 @@
 			countdown = 0;
 
 			const canvasElement = canvas;
-			const width = 1134;
-			const height = 660;
+			const { width, height } = activeFrame;
 			const context = canvasElement.getContext('2d');
 			if (!context) throw new Error('Canvas unavailable');
 
@@ -222,7 +240,7 @@
 			);
 			context.restore();
 
-			const frame = await loadImage(frameUrl);
+			const frame = await loadImage(activeFrame.url);
 			context.drawImage(frame, 0, 0, width, height);
 			await document.fonts.load("58px 'Mea Culpa'");
 			drawSignature(context, width, height);
@@ -245,6 +263,7 @@
 		facingMode = 'user';
 		mirrorPhoto = true;
 		timerSeconds = 3;
+		frameFormat = 'landscape';
 		signature = '';
 		signaturePosition = 'center';
 		signatureColor = 'cream';
@@ -275,8 +294,12 @@
 	</header>
 
 	<div class="photobox-layout">
-		<div class="camera-column">
-			<section class="camera-shell" aria-live="polite">
+		<div class:portrait={frameFormat === 'portrait'} class="camera-column">
+			<section
+				class:portrait={frameFormat === 'portrait'}
+				class="camera-shell"
+				aria-live="polite"
+			>
 				{#if photoUrl}
 					<img class="photo-result" src={photoUrl} alt="Potret Red Tulip kamu" />
 				{:else}
@@ -289,7 +312,7 @@
 							style:filter={previewFilter}
 							class:mirrored={mirrorPhoto}
 						></video>
-						<img class="camera-frame" src={frameUrl} alt="" aria-hidden="true" />
+						<img class="camera-frame" src={activeFrame.url} alt="" aria-hidden="true" />
 
 						{#if signature.trim()}
 							<p
@@ -364,6 +387,23 @@
 								>
 									<span class="filter-swatch" style:filter={filter.css}></span>
 									{filter.label}
+								</button>
+							{/each}
+						</div>
+					</fieldset>
+
+					<fieldset>
+						<legend>Format</legend>
+						<div class="format-options">
+							{#each Object.entries(frames) as [format, frame]}
+								<button
+									class:active={frameFormat === format}
+									type="button"
+									aria-pressed={frameFormat === format}
+									onclick={() => (frameFormat = format as FrameFormat)}
+								>
+									<span class="format-icon format-{format}" aria-hidden="true"></span>
+									{frame.label}
 								</button>
 							{/each}
 						</div>
@@ -500,6 +540,15 @@
 		border-radius: 1.25rem;
 		background: #24191b;
 		box-shadow: 0 12px 0 rgb(200 73 90 / 18%);
+	}
+
+	.camera-column.portrait {
+		width: min(100%, 31rem);
+		justify-self: center;
+	}
+
+	.camera-shell.portrait {
+		aspect-ratio: 1080 / 1920;
 	}
 
 	.camera-view {
@@ -657,6 +706,46 @@
 		display: grid;
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 		gap: 0.45rem;
+	}
+
+	.format-options {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 0.45rem;
+	}
+
+	.format-options button {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.45rem;
+		border: 1px solid rgb(200 73 90 / 24%);
+		border-radius: 0.65rem;
+		background: rgb(254 244 218 / 62%);
+		padding: 0.6rem;
+		color: var(--color-tulip);
+		cursor: pointer;
+	}
+
+	.format-options button.active {
+		border-color: var(--color-tulip);
+		background: rgb(251 144 195 / 24%);
+	}
+
+	.format-icon {
+		display: inline-block;
+		border: 1px solid currentColor;
+		border-radius: 0.15rem;
+	}
+
+	.format-landscape {
+		width: 1.25rem;
+		height: 0.75rem;
+	}
+
+	.format-portrait {
+		width: 0.75rem;
+		height: 1.25rem;
 	}
 
 	.filter-grid button {
