@@ -8,8 +8,16 @@
 	let photoUrl = $state('');
 	let cameraReady = $state(false);
 	let cameraError = $state('');
+	let isCapturing = $state(false);
+
+	function stopCamera() {
+		stream?.getTracks().forEach((track) => track.stop());
+		stream = null;
+		cameraReady = false;
+	}
 
 	async function startCamera() {
+		stopCamera();
 		cameraError = '';
 		const videoElement = video;
 
@@ -25,20 +33,42 @@
 			});
 			videoElement.srcObject = stream;
 			await videoElement.play();
+			stream.getVideoTracks()[0]?.addEventListener(
+				'ended',
+				() => {
+					cameraReady = false;
+					cameraError = 'Kamera terputus. Sambungkan kembali lalu coba lagi.';
+				},
+				{ once: true }
+			);
 			cameraReady = true;
 		} catch {
+			stopCamera();
 			cameraError = 'Kamera belum bisa dibuka. Izinkan akses kamera lalu coba lagi.';
 		}
 	}
 
-	function takePhoto() {
-		if (!cameraReady || !video || !canvas || !video.videoWidth || !video.videoHeight) return;
+	async function takePhoto() {
+		if (
+			isCapturing ||
+			!cameraReady ||
+			!video ||
+			!canvas ||
+			!video.videoWidth ||
+			!video.videoHeight
+		) {
+			return;
+		}
 
+		isCapturing = true;
 		const canvasElement = canvas;
 		const width = 1134;
 		const height = 660;
 		const context = canvasElement.getContext('2d');
-		if (!context) return;
+		if (!context) {
+			isCapturing = false;
+			return;
+		}
 
 		canvasElement.width = width;
 		canvasElement.height = height;
@@ -74,12 +104,20 @@
 		);
 		context.restore();
 
-		const frame = new Image();
-		frame.onload = () => {
+		try {
+			const frame = new Image();
+			await new Promise<void>((resolve, reject) => {
+				frame.onload = () => resolve();
+				frame.onerror = () => reject();
+				frame.src = frameUrl;
+			});
 			context.drawImage(frame, 0, 0, width, height);
 			photoUrl = canvasElement.toDataURL('image/png');
-		};
-		frame.src = frameUrl;
+		} catch {
+			cameraError = 'Bingkai foto gagal dimuat. Muat ulang halaman lalu coba lagi.';
+		} finally {
+			isCapturing = false;
+		}
 	}
 
 	function retake() {
@@ -89,9 +127,7 @@
 	onMount(() => {
 		startCamera();
 
-		return () => {
-			stream?.getTracks().forEach((track) => track.stop());
-		};
+		return stopCamera;
 	});
 </script>
 
@@ -136,8 +172,13 @@
 			<button class="secondary-button" type="button" onclick={retake}>Foto Ulang</button>
 			<a class="primary-button" href={photoUrl} download="red-tulip-photobox.png">Unduh Foto</a>
 		{:else}
-			<button class="primary-button" type="button" onclick={takePhoto} disabled={!cameraReady}>
-				Ambil Foto
+			<button
+				class="primary-button"
+				type="button"
+				onclick={takePhoto}
+				disabled={!cameraReady || isCapturing}
+			>
+				{isCapturing ? 'Memproses...' : 'Ambil Foto'}
 			</button>
 		{/if}
 	</div>
