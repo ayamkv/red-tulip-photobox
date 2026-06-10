@@ -1,42 +1,33 @@
-# sv
+# Red Tulip Photobox
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+A browser-based photobox for Red Tulip by berdasteran.co. Visitors can open their camera, take a portrait with the Red Tulip frame, retake it, and download the result.
 
-## Creating a project
+## Stack
 
-If you're seeing this, you've probably already done this step. Congrats!
+- SvelteKit
+- Svelte 5
+- Tailwind CSS 4
+- GSAP
+- TypeScript
 
-```sh
-# create a new project
-npx sv create my-app
-```
+## Development
 
-To recreate this project with the same configuration:
-
-```sh
-# recreate this project
-npx sv@0.16.1 create --template minimal --types ts --add tailwindcss="plugins:none" --no-download-check --install npm .
-```
-
-## Developing
-
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
+Install dependencies and start the local server:
 
 ```sh
-npm run dev
-
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
+pnpm install
+pnpm dev
 ```
 
-## Building
+Then open the local URL shown by Vite.
 
-To create a production version of your app:
+## Checks
 
 ```sh
-npm run build
+pnpm check
+pnpm build
 ```
 
-You can preview the production build with `npm run preview`.
+## Camera Access
 
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
+Camera access works on `localhost` during development. A deployed version must use HTTPS and the visitor must grant camera permission in their browser.
