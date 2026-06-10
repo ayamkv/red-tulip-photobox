@@ -5,23 +5,59 @@
 	type SignaturePosition = 'left' | 'center' | 'right';
 	type SignatureColor = 'cream' | 'pink' | 'dark';
 	type FacingMode = 'user' | 'environment';
-	type FrameFormat = 'landscape' | 'portrait';
+	type FrameFormat = 'landscape' | 'portrait' | 'multiCream' | 'multiPink';
+	type PhotoSlot = { x: number; y: number; width: number; height: number };
+	type FrameConfig = {
+		label: string;
+		url: string;
+		width: number;
+		height: number;
+		kind: 'single' | 'multi';
+		slots?: PhotoSlot[];
+		hasSignaturePrefix?: boolean;
+	};
 
-	const frames: Record<
-		FrameFormat,
-		{ label: string; url: string; width: number; height: number }
-	> = {
+	const multiShotWidth = 1080 - 70 * 2;
+	const multiShotHeight = (multiShotWidth / 16) * 9;
+	const multiSlots: PhotoSlot[] = [0, 1, 2].map((index) => ({
+		x: 70,
+		y: 60 + index * (multiShotHeight + 18),
+		width: multiShotWidth,
+		height: multiShotHeight
+	}));
+
+	const frames: Record<FrameFormat, FrameConfig> = {
 		landscape: {
 			label: 'Landscape',
 			url: '/assets/camboxframe1.png',
 			width: 1134,
-			height: 660
+			height: 660,
+			kind: 'single'
 		},
 		portrait: {
 			label: 'Portrait',
 			url: '/assets/camboxframe1vertical.png',
 			width: 1080,
-			height: 1920
+			height: 1920,
+			kind: 'single'
+		},
+		multiCream: {
+			label: '3 Foto Cream',
+			url: '/assets/multiVertical.png',
+			width: 1080,
+			height: 1920,
+			kind: 'multi',
+			slots: multiSlots,
+			hasSignaturePrefix: true
+		},
+		multiPink: {
+			label: '3 Foto Pink',
+			url: '/assets/multiVertical1.png',
+			width: 1080,
+			height: 1920,
+			kind: 'multi',
+			slots: multiSlots,
+			hasSignaturePrefix: true
 		}
 	};
 	const filters: Array<{ id: FilterId; label: string; css: string }> = [
@@ -37,10 +73,15 @@
 	};
 
 	let video = $state<HTMLVideoElement>();
+	let multiVideoOne = $state<HTMLVideoElement>();
+	let multiVideoTwo = $state<HTMLVideoElement>();
+	let multiVideoThree = $state<HTMLVideoElement>();
 	let canvas = $state<HTMLCanvasElement>();
 	let stream: MediaStream | null = null;
 	let demoCanvas: HTMLCanvasElement | null = null;
 	let photoUrl = $state('');
+	let shotUrls = $state<string[]>([]);
+	let currentShotUrl = $state('');
 	let cameraReady = $state(false);
 	let cameraError = $state('');
 	let isCapturing = $state(false);
@@ -58,9 +99,43 @@
 
 	let activeFilter = $derived(filters.find((filter) => filter.id === selectedFilter) ?? filters[0]);
 	let activeFrame = $derived(frames[frameFormat]);
+	let signatureText = $derived(
+		signature.trim() ? `Berdasteran with ${signature.trim()}` : ''
+	);
+	let renderedSignatureText = $derived(
+		activeFrame.hasSignaturePrefix ? signature.trim() : signatureText
+	);
+	let captureSlots = $derived(
+		activeFrame.kind === 'multi'
+			? (activeFrame.slots ?? [])
+			: [{ x: 0, y: 0, width: activeFrame.width, height: activeFrame.height }]
+	);
+	let totalCaptureSteps = $derived(captureSlots.length);
+	let currentSlotIndex = $derived(Math.min(shotUrls.length, totalCaptureSteps - 1));
+	let hasStartedPhoto = $derived(Boolean(photoUrl || currentShotUrl || shotUrls.length));
 	let previewFilter = $derived(
 		`${activeFilter.css === 'none' ? '' : activeFilter.css} brightness(${brightness}%)`.trim()
 	);
+
+	async function playStreamVideo(videoElement: HTMLVideoElement | undefined) {
+		if (!stream || !videoElement) return;
+
+		if (videoElement.srcObject !== stream) {
+			videoElement.srcObject = stream;
+		}
+
+		await videoElement.play().catch(() => undefined);
+	}
+
+	async function syncPreviewVideos() {
+		if (!stream) return;
+		await Promise.all([
+			playStreamVideo(video),
+			playStreamVideo(multiVideoOne),
+			playStreamVideo(multiVideoTwo),
+			playStreamVideo(multiVideoThree)
+		]);
+	}
 
 	function stopCamera() {
 		stream?.getTracks().forEach((track) => track.stop());
@@ -116,9 +191,10 @@
 							height: { ideal: 720 }
 						},
 						audio: false
-					});
+			});
 			videoElement.srcObject = stream;
 			await videoElement.play();
+			await syncPreviewVideos();
 			stream.getVideoTracks()[0]?.addEventListener(
 				'ended',
 				() => {
@@ -139,8 +215,23 @@
 		await startCamera();
 	}
 
+	function selectFrame(format: FrameFormat) {
+		if (hasStartedPhoto) return;
+		frameFormat = format;
+		requestAnimationFrame(() => void syncPreviewVideos());
+	}
+
 	function wait(milliseconds: number) {
 		return new Promise((resolve) => setTimeout(resolve, milliseconds));
+	}
+
+	async function waitForVideoDimensions(videoElement: HTMLVideoElement) {
+		for (let attempt = 0; attempt < 10; attempt += 1) {
+			if (videoElement.videoWidth && videoElement.videoHeight) return true;
+			await wait(100);
+		}
+
+		return Boolean(videoElement.videoWidth && videoElement.videoHeight);
 	}
 
 	async function loadImage(url: string) {
@@ -153,9 +244,91 @@
 		return image;
 	}
 
+	function drawVideoFrame(context: CanvasRenderingContext2D, slot: PhotoSlot) {
+		if (!video) return false;
+
+		const sourceRatio = video.videoWidth / video.videoHeight;
+		const targetRatio = slot.width / slot.height;
+		let sourceWidth = video.videoWidth;
+		let sourceHeight = video.videoHeight;
+		let sourceX = 0;
+		let sourceY = 0;
+
+		if (sourceRatio > targetRatio) {
+			sourceWidth = video.videoHeight * targetRatio;
+			sourceX = (video.videoWidth - sourceWidth) / 2;
+		} else {
+			sourceHeight = video.videoWidth / targetRatio;
+			sourceY = (video.videoHeight - sourceHeight) / 2;
+		}
+
+		context.save();
+		context.translate(slot.x, slot.y);
+		if (mirrorPhoto) {
+			context.translate(slot.width, 0);
+			context.scale(-1, 1);
+		}
+		context.drawImage(
+			video,
+			sourceX,
+			sourceY,
+			sourceWidth,
+			sourceHeight,
+			0,
+			0,
+			slot.width,
+			slot.height
+		);
+		context.restore();
+		return true;
+	}
+
+	function captureSlot(slot: PhotoSlot) {
+		const slotCanvas = document.createElement('canvas');
+		slotCanvas.width = slot.width;
+		slotCanvas.height = slot.height;
+		const context = slotCanvas.getContext('2d');
+		if (!context || !video) throw new Error('Canvas unavailable');
+
+		const didDraw = drawVideoFrame(context, {
+			x: 0,
+			y: 0,
+			width: slot.width,
+			height: slot.height
+		});
+		if (!didDraw) throw new Error('Video unavailable');
+
+		return slotCanvas.toDataURL('image/png');
+	}
+
+	async function drawShot(
+		context: CanvasRenderingContext2D,
+		shotUrl: string,
+		slot: PhotoSlot
+	) {
+		const shot = await loadImage(shotUrl);
+		context.save();
+		context.filter = previewFilter;
+		context.drawImage(shot, slot.x, slot.y, slot.width, slot.height);
+		context.restore();
+	}
+
 	function drawSignature(context: CanvasRenderingContext2D, width: number, height: number) {
-		const text = signature.trim();
-		if (!text) return;
+		if (!renderedSignatureText) return;
+
+		if (activeFrame.hasSignaturePrefix) {
+			context.save();
+			context.font = "58px 'Mea Culpa', cursive";
+			context.textAlign = 'left';
+			context.textBaseline = 'middle';
+			context.fillStyle = signatureColors[signatureColor];
+			context.shadowColor = 'rgb(36 25 27 / 55%)';
+			context.shadowBlur = 8;
+			context.shadowOffsetY = 3;
+			context.fillText(renderedSignatureText, 224, height * 0.592, width * 0.36);
+			context.restore();
+			return;
+		}
 
 		const positions: Record<SignaturePosition, { x: number; align: CanvasTextAlign }> = {
 			left: { x: width * 0.12, align: 'left' },
@@ -172,19 +345,52 @@
 		context.shadowColor = 'rgb(36 25 27 / 55%)';
 		context.shadowBlur = 8;
 		context.shadowOffsetY = 3;
-		context.fillText(text, position.x, height * 0.76, width * 0.55);
+		context.fillText(renderedSignatureText, position.x, height * 0.76, width * 0.72);
 		context.restore();
 	}
 
+	async function renderPhoto(shots = shotUrls) {
+		if (!canvas || !shots.length) return;
+
+		const canvasElement = canvas;
+		const { width, height } = activeFrame;
+		const context = canvasElement.getContext('2d');
+		if (!context) throw new Error('Canvas unavailable');
+
+		canvasElement.width = width;
+		canvasElement.height = height;
+		context.clearRect(0, 0, width, height);
+
+		for (let index = 0; index < shots.length; index += 1) {
+			await drawShot(context, shots[index], captureSlots[index]);
+		}
+
+		const frame = await loadImage(activeFrame.url);
+		context.drawImage(frame, 0, 0, width, height);
+		await document.fonts.load("58px 'Mea Culpa'");
+		drawSignature(context, width, height);
+		photoUrl = canvasElement.toDataURL('image/png');
+	}
+
+	async function runCountdown() {
+		for (let remaining = timerSeconds; remaining > 0; remaining -= 1) {
+			countdown = remaining;
+			await wait(1000);
+		}
+		countdown = 0;
+	}
+
 	async function takePhoto() {
+		await syncPreviewVideos();
+		const hasVideoDimensions = video ? await waitForVideoDimensions(video) : false;
+
 		if (
 			isCapturing ||
 			!cameraReady ||
 			!video ||
-			!canvas ||
-			!video.videoWidth ||
-			!video.videoHeight
+			!hasVideoDimensions
 		) {
+			cameraError = 'Kamera belum siap. Tunggu sebentar lalu coba lagi.';
 			return;
 		}
 
@@ -192,59 +398,15 @@
 		cameraError = '';
 
 		try {
-			for (let remaining = timerSeconds; remaining > 0; remaining -= 1) {
-				countdown = remaining;
-				await wait(1000);
-			}
-			countdown = 0;
-
-			const canvasElement = canvas;
-			const { width, height } = activeFrame;
-			const context = canvasElement.getContext('2d');
-			if (!context) throw new Error('Canvas unavailable');
-
-			canvasElement.width = width;
-			canvasElement.height = height;
-
-			const sourceRatio = video.videoWidth / video.videoHeight;
-			const targetRatio = width / height;
-			let sourceWidth = video.videoWidth;
-			let sourceHeight = video.videoHeight;
-			let sourceX = 0;
-			let sourceY = 0;
-
-			if (sourceRatio > targetRatio) {
-				sourceWidth = video.videoHeight * targetRatio;
-				sourceX = (video.videoWidth - sourceWidth) / 2;
+			if (activeFrame.kind === 'multi') {
+				await runCountdown();
+				currentShotUrl = captureSlot(captureSlots[currentSlotIndex]);
 			} else {
-				sourceHeight = video.videoWidth / targetRatio;
-				sourceY = (video.videoHeight - sourceHeight) / 2;
+				await runCountdown();
+				const capturedShot = captureSlot(captureSlots[0]);
+				shotUrls = [capturedShot];
+				await renderPhoto([capturedShot]);
 			}
-
-			context.save();
-			context.filter = previewFilter;
-			if (mirrorPhoto) {
-				context.translate(width, 0);
-				context.scale(-1, 1);
-			}
-			context.drawImage(
-				video,
-				sourceX,
-				sourceY,
-				sourceWidth,
-				sourceHeight,
-				0,
-				0,
-				width,
-				height
-			);
-			context.restore();
-
-			const frame = await loadImage(activeFrame.url);
-			context.drawImage(frame, 0, 0, width, height);
-			await document.fonts.load("58px 'Mea Culpa'");
-			drawSignature(context, width, height);
-			photoUrl = canvasElement.toDataURL('image/png');
 		} catch {
 			cameraError = 'Foto gagal diproses. Muat ulang halaman lalu coba lagi.';
 		} finally {
@@ -255,9 +417,41 @@
 
 	function retake() {
 		photoUrl = '';
+		shotUrls = [];
+		currentShotUrl = '';
+		requestAnimationFrame(() => void syncPreviewVideos());
+	}
+
+	function retakeCurrentShot() {
+		currentShotUrl = '';
+		requestAnimationFrame(() => void syncPreviewVideos());
+	}
+
+	async function continueMultiPhoto() {
+		if (!currentShotUrl) return;
+
+		const nextShots = [...shotUrls, currentShotUrl];
+		shotUrls = nextShots;
+		currentShotUrl = '';
+
+		if (nextShots.length === totalCaptureSteps) {
+			await renderPhoto(nextShots);
+		} else {
+			requestAnimationFrame(() => void syncPreviewVideos());
+		}
+	}
+
+	async function updateFilter(filterId: FilterId) {
+		selectedFilter = filterId;
+		if (photoUrl) await renderPhoto();
+	}
+
+	async function updateBrightness() {
+		if (photoUrl) await renderPhoto();
 	}
 
 	function resetSettings() {
+		retake();
 		selectedFilter = 'natural';
 		brightness = 100;
 		facingMode = 'user';
@@ -294,9 +488,12 @@
 	</header>
 
 	<div class="photobox-layout">
-		<div class:portrait={frameFormat === 'portrait'} class="camera-column">
+		<div
+			class:portrait={frameFormat === 'portrait' || activeFrame.kind === 'multi'}
+			class="camera-column"
+		>
 			<section
-				class:portrait={frameFormat === 'portrait'}
+				class:portrait={frameFormat === 'portrait' || activeFrame.kind === 'multi'}
 				class="camera-shell"
 				aria-live="polite"
 			>
@@ -304,26 +501,92 @@
 					<img class="photo-result" src={photoUrl} alt="Potret Red Tulip kamu" />
 				{:else}
 					<div class="camera-view">
+						{#if activeFrame.kind === 'multi'}
+							<div class="multi-preview-slots" aria-hidden="true">
+								{#each captureSlots as slot, index}
+									<div
+										class="multi-preview-slot"
+										class:active-slot={index === currentSlotIndex && !photoUrl}
+										style:left={`${(slot.x / activeFrame.width) * 100}%`}
+										style:top={`${(slot.y / activeFrame.height) * 100}%`}
+										style:width={`${(slot.width / activeFrame.width) * 100}%`}
+										style:height={`${(slot.height / activeFrame.height) * 100}%`}
+									>
+										{#if shotUrls[index] || (index === currentSlotIndex && currentShotUrl)}
+											<img
+												class="slot-photo"
+												src={shotUrls[index] ?? currentShotUrl}
+												alt=""
+												style:filter={previewFilter}
+											/>
+										{:else if index === currentSlotIndex}
+											{#if index === 0}
+												<video
+													bind:this={multiVideoOne}
+													playsinline
+													muted
+													style:filter={previewFilter}
+													class:mirrored={mirrorPhoto}
+												></video>
+											{:else if index === 1}
+												<video
+													bind:this={multiVideoTwo}
+													playsinline
+													muted
+													style:filter={previewFilter}
+													class:mirrored={mirrorPhoto}
+												></video>
+											{:else}
+												<video
+													bind:this={multiVideoThree}
+													playsinline
+													muted
+													style:filter={previewFilter}
+													class:mirrored={mirrorPhoto}
+												></video>
+											{/if}
+										{/if}
+
+										{#if isCapturing && index === currentSlotIndex && countdown > 0}
+											<p
+												class="slot-countdown"
+												aria-label={`Foto ${currentSlotIndex + 1} diambil dalam ${countdown}`}
+											>
+												{countdown}
+											</p>
+										{/if}
+
+										{#if index === currentSlotIndex && !currentShotUrl && !photoUrl}
+											<p class="slot-step">Foto {currentSlotIndex + 1}/{totalCaptureSteps}</p>
+										{/if}
+									</div>
+								{/each}
+							</div>
+						{/if}
+
 						<video
 							bind:this={video}
 							playsinline
 							muted
 							aria-label="Pratinjau kamera"
-							style:filter={previewFilter}
-							class:mirrored={mirrorPhoto}
+							style:filter={activeFrame.kind === 'multi' ? '' : previewFilter}
+							class:mirrored={activeFrame.kind !== 'multi' && mirrorPhoto}
+							class:capture-source={activeFrame.kind === 'multi'}
 						></video>
+
 						<img class="camera-frame" src={activeFrame.url} alt="" aria-hidden="true" />
 
-						{#if signature.trim()}
+						{#if renderedSignatureText}
 							<p
 								class="signature-preview signature-{signaturePosition}"
+								class:signature-built-in={activeFrame.hasSignaturePrefix}
 								style:color={signatureColors[signatureColor]}
 							>
-								{signature.trim()}
+								{renderedSignatureText}
 							</p>
 						{/if}
 
-						{#if countdown > 0}
+						{#if activeFrame.kind !== 'multi' && countdown > 0}
 							<p class="countdown" aria-label={`Foto diambil dalam ${countdown}`}>{countdown}</p>
 						{/if}
 
@@ -349,6 +612,13 @@
 					<a class="primary-button" href={photoUrl} download="red-tulip-photobox.png">
 						Unduh Foto
 					</a>
+				{:else if activeFrame.kind === 'multi' && currentShotUrl}
+					<button class="secondary-button" type="button" onclick={retakeCurrentShot}>
+						Foto Ulang
+					</button>
+					<button class="primary-button" type="button" onclick={continueMultiPhoto}>
+						{shotUrls.length + 1 === totalCaptureSteps ? 'Selesai' : 'Lanjut'}
+					</button>
 				{:else}
 					<button
 						class="primary-button"
@@ -356,7 +626,13 @@
 						onclick={takePhoto}
 						disabled={!cameraReady || isCapturing}
 					>
-						{isCapturing ? (countdown > 0 ? `Siap... ${countdown}` : 'Memproses...') : 'Ambil Foto'}
+						{#if isCapturing}
+							{countdown > 0 ? `Siap... ${countdown}` : 'Memproses...'}
+						{:else if totalCaptureSteps > 1}
+							Ambil Foto {currentSlotIndex + 1}
+						{:else}
+							Ambil Foto
+						{/if}
 					</button>
 				{/if}
 			</div>
@@ -383,7 +659,7 @@
 									class:active={selectedFilter === filter.id}
 									type="button"
 									aria-pressed={selectedFilter === filter.id}
-									onclick={() => (selectedFilter = filter.id)}
+									onclick={() => updateFilter(filter.id)}
 								>
 									<span class="filter-swatch" style:filter={filter.css}></span>
 									{filter.label}
@@ -400,7 +676,8 @@
 									class:active={frameFormat === format}
 									type="button"
 									aria-pressed={frameFormat === format}
-									onclick={() => (frameFormat = format as FrameFormat)}
+									disabled={hasStartedPhoto}
+									onclick={() => selectFrame(format as FrameFormat)}
 								>
 									<span class="format-icon format-{format}" aria-hidden="true"></span>
 									{frame.label}
@@ -411,13 +688,20 @@
 
 					<label class="control">
 						<span>Kecerahan <output>{brightness}%</output></span>
-						<input bind:value={brightness} type="range" min="75" max="125" step="5" />
+						<input
+							bind:value={brightness}
+							type="range"
+							min="75"
+							max="125"
+							step="5"
+							onchange={updateBrightness}
+						/>
 					</label>
 
 					<div class="settings-row">
 						<label class="control">
 							<span>Kamera</span>
-							<select value={facingMode} onchange={changeCamera}>
+							<select value={facingMode} onchange={changeCamera} disabled={hasStartedPhoto}>
 								<option value="user">Depan</option>
 								<option value="environment">Belakang</option>
 							</select>
@@ -425,7 +709,7 @@
 
 						<label class="control">
 							<span>Timer</span>
-							<select bind:value={timerSeconds}>
+							<select bind:value={timerSeconds} disabled={hasStartedPhoto}>
 								<option value={0}>Tanpa timer</option>
 								<option value={3}>3 detik</option>
 								<option value={5}>5 detik</option>
@@ -433,27 +717,28 @@
 						</label>
 					</div>
 
-					<label class="switch-control">
-						<input bind:checked={mirrorPhoto} type="checkbox" />
+					<label class="switch-control" class:disabled={hasStartedPhoto}>
+						<input bind:checked={mirrorPhoto} type="checkbox" disabled={hasStartedPhoto} />
 						<span>Cerminkan foto</span>
 					</label>
 
 					<fieldset class="signature-settings">
 						<legend>Tanda tangan</legend>
 						<label class="control">
-							<span>Nama atau pesan</span>
+							<span>Teks setelah “Berdasteran with”</span>
 							<input
 								bind:value={signature}
 								type="text"
 								maxlength="30"
-								placeholder="contoh: with love, Ayam"
+								placeholder="contoh: Ayam"
+								onchange={() => renderPhoto()}
 							/>
 						</label>
 
 						<div class="settings-row">
 							<label class="control">
 								<span>Posisi</span>
-								<select bind:value={signaturePosition}>
+								<select bind:value={signaturePosition} onchange={() => renderPhoto()}>
 									<option value="left">Kiri</option>
 									<option value="center">Tengah</option>
 									<option value="right">Kanan</option>
@@ -470,7 +755,10 @@
 											aria-label={`Warna tanda tangan ${color}`}
 											aria-pressed={signatureColor === color}
 											style:background={value}
-											onclick={() => (signatureColor = color as SignatureColor)}
+											onclick={async () => {
+												signatureColor = color as SignatureColor;
+												if (photoUrl) await renderPhoto();
+											}}
 										></button>
 									{/each}
 								</div>
@@ -569,9 +857,67 @@
 		transform: scaleX(-1);
 	}
 
+	video.capture-source {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		opacity: 0;
+		pointer-events: none;
+	}
+
+	.multi-preview-slots {
+		position: absolute;
+		inset: 0;
+		z-index: 1;
+	}
+
+	.multi-preview-slot {
+		position: absolute;
+		overflow: hidden;
+		background: #24191b;
+	}
+
+	.multi-preview-slot.active-slot {
+		outline: 3px solid rgb(253 114 182 / 72%);
+		outline-offset: -3px;
+	}
+
+	.multi-preview-slot video,
+	.slot-photo {
+		display: block;
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+	}
+
+	.slot-countdown {
+		position: absolute;
+		inset: 0;
+		display: grid;
+		place-items: center;
+		margin: 0;
+		background: rgb(36 25 27 / 28%);
+		color: var(--color-cream);
+		font-size: clamp(3rem, 14vw, 7rem);
+		text-shadow: 0 5px 0 var(--color-tulip);
+	}
+
+	.slot-step {
+		position: absolute;
+		right: 0.65rem;
+		bottom: 0.65rem;
+		margin: 0;
+		border-radius: 999px;
+		background: rgb(36 25 27 / 68%);
+		padding: 0.35rem 0.65rem;
+		color: var(--color-cream);
+		font-size: clamp(0.7rem, 2vw, 0.95rem);
+	}
+
 	.camera-frame {
 		position: absolute;
 		inset: 0;
+		z-index: 2;
 		width: 100%;
 		height: 100%;
 		pointer-events: none;
@@ -591,6 +937,15 @@
 		white-space: nowrap;
 		text-shadow: 0 3px 8px rgb(36 25 27 / 55%);
 		pointer-events: none;
+	}
+
+	.signature-built-in {
+		top: 58.1%;
+		bottom: auto;
+		left: 20.75%;
+		max-width: 36%;
+		transform: none;
+		font-size: clamp(1.25rem, 4vw, 3.35rem);
 	}
 
 	.signature-left {
@@ -732,6 +1087,13 @@
 		background: rgb(251 144 195 / 24%);
 	}
 
+	.format-options button:disabled,
+	.control select:disabled,
+	.switch-control.disabled {
+		opacity: 0.52;
+		cursor: not-allowed;
+	}
+
 	.format-icon {
 		display: inline-block;
 		border: 1px solid currentColor;
@@ -746,6 +1108,20 @@
 	.format-portrait {
 		width: 0.75rem;
 		height: 1.25rem;
+	}
+
+	.format-multiCream,
+	.format-multiPink {
+		width: 0.75rem;
+		height: 1.25rem;
+		background: linear-gradient(
+			to bottom,
+			transparent 0 29%,
+			currentColor 29% 31%,
+			transparent 31% 64%,
+			currentColor 64% 66%,
+			transparent 66%
+		);
 	}
 
 	.filter-grid button {

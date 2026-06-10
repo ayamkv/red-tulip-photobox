@@ -7,9 +7,10 @@ A browser-based photobox for Red Tulip by berdasteran.co. Visitors can open thei
 - Front and rear camera support
 - Natural, warm, monochrome, and dreamy filters
 - Landscape and portrait Red Tulip frames
+- Step-by-step three-shot vertical photobox frames with per-shot retake
 - Adjustable brightness and mirror mode
 - Optional 3 or 5 second countdown
-- Custom signature text with position and color controls
+- `Berdasteran with ...` signature text with position and color controls
 - Signature, filter, and frame composited into the downloaded PNG
 - Responsive controls for desktop and mobile
 
