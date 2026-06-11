@@ -117,6 +117,25 @@
 		`${activeFilter.css === 'none' ? '' : activeFilter.css} brightness(${brightness}%)`.trim()
 	);
 
+	function revokeUrl(url: string) {
+		if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+	}
+
+	function clearCapturedMedia() {
+		revokeUrl(photoUrl);
+		revokeUrl(currentShotUrl);
+		shotUrls.forEach(revokeUrl);
+		photoUrl = '';
+		shotUrls = [];
+		currentShotUrl = '';
+	}
+
+	function detachStreamVideo(videoElement: HTMLVideoElement | undefined) {
+		if (!videoElement) return;
+		videoElement.pause();
+		videoElement.srcObject = null;
+	}
+
 	async function playStreamVideo(videoElement: HTMLVideoElement | undefined) {
 		if (!stream || !videoElement) return;
 
@@ -139,6 +158,10 @@
 
 	function stopCamera() {
 		stream?.getTracks().forEach((track) => track.stop());
+		detachStreamVideo(video);
+		detachStreamVideo(multiVideoOne);
+		detachStreamVideo(multiVideoTwo);
+		detachStreamVideo(multiVideoThree);
 		stream = null;
 		demoCanvas = null;
 		cameraReady = false;
@@ -283,22 +306,45 @@
 		return true;
 	}
 
-	function captureSlot(slot: PhotoSlot) {
+	function canvasToBlob(
+		canvasElement: HTMLCanvasElement,
+		type = 'image/png',
+		quality?: number
+	) {
+		return new Promise<Blob>((resolve, reject) => {
+			canvasElement.toBlob(
+				(blob) => {
+					if (blob) resolve(blob);
+					else reject(new Error('Image export unavailable'));
+				},
+				type,
+				quality
+			);
+		});
+	}
+
+	async function captureSlot(slot: PhotoSlot) {
 		const slotCanvas = document.createElement('canvas');
 		slotCanvas.width = slot.width;
 		slotCanvas.height = slot.height;
 		const context = slotCanvas.getContext('2d');
 		if (!context || !video) throw new Error('Canvas unavailable');
 
-		const didDraw = drawVideoFrame(context, {
-			x: 0,
-			y: 0,
-			width: slot.width,
-			height: slot.height
-		});
-		if (!didDraw) throw new Error('Video unavailable');
+		try {
+			const didDraw = drawVideoFrame(context, {
+				x: 0,
+				y: 0,
+				width: slot.width,
+				height: slot.height
+			});
+			if (!didDraw) throw new Error('Video unavailable');
 
-		return slotCanvas.toDataURL('image/png');
+			const blob = await canvasToBlob(slotCanvas, 'image/jpeg', 0.92);
+			return URL.createObjectURL(blob);
+		} finally {
+			slotCanvas.width = 1;
+			slotCanvas.height = 1;
+		}
 	}
 
 	async function drawShot(
@@ -354,22 +400,31 @@
 
 		const canvasElement = canvas;
 		const { width, height } = activeFrame;
+		canvasElement.width = width;
+		canvasElement.height = height;
 		const context = canvasElement.getContext('2d');
 		if (!context) throw new Error('Canvas unavailable');
 
-		canvasElement.width = width;
-		canvasElement.height = height;
-		context.clearRect(0, 0, width, height);
+		try {
+			context.clearRect(0, 0, width, height);
 
-		for (let index = 0; index < shots.length; index += 1) {
-			await drawShot(context, shots[index], captureSlots[index]);
+			for (let index = 0; index < shots.length; index += 1) {
+				await drawShot(context, shots[index], captureSlots[index]);
+			}
+
+			const frame = await loadImage(activeFrame.url);
+			context.drawImage(frame, 0, 0, width, height);
+			await document.fonts.load("58px 'Mea Culpa'");
+			drawSignature(context, width, height);
+
+			const blob = await canvasToBlob(canvasElement);
+			const nextPhotoUrl = URL.createObjectURL(blob);
+			revokeUrl(photoUrl);
+			photoUrl = nextPhotoUrl;
+		} finally {
+			canvasElement.width = 1;
+			canvasElement.height = 1;
 		}
-
-		const frame = await loadImage(activeFrame.url);
-		context.drawImage(frame, 0, 0, width, height);
-		await document.fonts.load("58px 'Mea Culpa'");
-		drawSignature(context, width, height);
-		photoUrl = canvasElement.toDataURL('image/png');
 	}
 
 	async function runCountdown() {
@@ -400,12 +455,13 @@
 		try {
 			if (activeFrame.kind === 'multi') {
 				await runCountdown();
-				currentShotUrl = captureSlot(captureSlots[currentSlotIndex]);
+				currentShotUrl = await captureSlot(captureSlots[currentSlotIndex]);
 			} else {
 				await runCountdown();
-				const capturedShot = captureSlot(captureSlots[0]);
+				const capturedShot = await captureSlot(captureSlots[0]);
 				shotUrls = [capturedShot];
 				await renderPhoto([capturedShot]);
+				stopCamera();
 			}
 		} catch {
 			cameraError = 'Foto gagal diproses. Muat ulang halaman lalu coba lagi.';
@@ -416,13 +472,12 @@
 	}
 
 	function retake() {
-		photoUrl = '';
-		shotUrls = [];
-		currentShotUrl = '';
-		requestAnimationFrame(() => void syncPreviewVideos());
+		clearCapturedMedia();
+		requestAnimationFrame(() => void startCamera());
 	}
 
 	function retakeCurrentShot() {
+		revokeUrl(currentShotUrl);
 		currentShotUrl = '';
 		requestAnimationFrame(() => void syncPreviewVideos());
 	}
@@ -436,6 +491,7 @@
 
 		if (nextShots.length === totalCaptureSteps) {
 			await renderPhoto(nextShots);
+			stopCamera();
 		} else {
 			requestAnimationFrame(() => void syncPreviewVideos());
 		}
@@ -461,12 +517,14 @@
 		signature = '';
 		signaturePosition = 'center';
 		signatureColor = 'cream';
-		startCamera();
 	}
 
 	onMount(() => {
 		startCamera();
-		return stopCamera;
+		return () => {
+			stopCamera();
+			clearCapturedMedia();
+		};
 	});
 </script>
 
