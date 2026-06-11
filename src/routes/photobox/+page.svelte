@@ -1,4 +1,5 @@
 <script lang="ts">
+	import QRCode from 'qrcode';
 	import { onMount } from 'svelte';
 
 	type FilterId = 'natural' | 'warm' | 'mono' | 'dreamy';
@@ -96,6 +97,11 @@
 	let signature = $state('');
 	let signaturePosition = $state<SignaturePosition>('center');
 	let signatureColor = $state<SignatureColor>('cream');
+	let isSharing = $state(false);
+	let shareError = $state('');
+	let shareUrl = $state('');
+	let qrCodeUrl = $state('');
+	let shareCopied = $state(false);
 
 	let activeFilter = $derived(filters.find((filter) => filter.id === selectedFilter) ?? filters[0]);
 	let activeFrame = $derived(frames[frameFormat]);
@@ -121,6 +127,13 @@
 		if (url.startsWith('blob:')) URL.revokeObjectURL(url);
 	}
 
+	function clearShareState() {
+		shareError = '';
+		shareUrl = '';
+		qrCodeUrl = '';
+		shareCopied = false;
+	}
+
 	function clearCapturedMedia() {
 		revokeUrl(photoUrl);
 		revokeUrl(currentShotUrl);
@@ -128,6 +141,7 @@
 		photoUrl = '';
 		shotUrls = [];
 		currentShotUrl = '';
+		clearShareState();
 	}
 
 	function detachStreamVideo(videoElement: HTMLVideoElement | undefined) {
@@ -421,6 +435,7 @@
 			const nextPhotoUrl = URL.createObjectURL(blob);
 			revokeUrl(photoUrl);
 			photoUrl = nextPhotoUrl;
+			clearShareState();
 		} finally {
 			canvasElement.width = 1;
 			canvasElement.height = 1;
@@ -504,6 +519,59 @@
 
 	async function updateBrightness() {
 		if (photoUrl) await renderPhoto();
+	}
+
+	async function createPhotoShare() {
+		if (!photoUrl || isSharing) return;
+
+		isSharing = true;
+		shareError = '';
+		shareCopied = false;
+
+		try {
+			const photo = await fetch(photoUrl).then((response) => response.blob());
+			const response = await fetch('/api/photos', {
+				method: 'POST',
+				headers: { 'content-type': 'image/png' },
+				body: photo
+			});
+			const result = (await response.json()) as {
+				message?: string;
+				shareUrl?: string;
+			};
+
+			if (!response.ok || !result.shareUrl) {
+				throw new Error(result.message ?? 'QR gagal dibuat.');
+			}
+
+			shareUrl = result.shareUrl;
+			qrCodeUrl = await QRCode.toDataURL(shareUrl, {
+				width: 320,
+				margin: 2,
+				color: {
+					dark: '#c8495a',
+					light: '#fef4da'
+				}
+			});
+		} catch (cause) {
+			shareError =
+				cause instanceof Error && cause.message !== 'Failed to fetch'
+					? cause.message
+					: 'QR gagal dibuat. Coba lagi sebentar.';
+		} finally {
+			isSharing = false;
+		}
+	}
+
+	async function copyShareLink() {
+		if (!shareUrl) return;
+
+		try {
+			await navigator.clipboard.writeText(shareUrl);
+			shareCopied = true;
+		} catch {
+			shareError = 'Link belum bisa disalin. Buka link lalu salin dari browser.';
+		}
 	}
 
 	function resetSettings() {
@@ -670,6 +738,14 @@
 					<a class="primary-button" href={photoUrl} download="red-tulip-photobox.png">
 						Unduh Foto
 					</a>
+					<button
+						class="secondary-button"
+						type="button"
+						onclick={createPhotoShare}
+						disabled={isSharing}
+					>
+						{isSharing ? 'Membuat QR...' : shareUrl ? 'Buat Ulang QR' : 'Buat QR'}
+					</button>
 				{:else if activeFrame.kind === 'multi' && currentShotUrl}
 					<button class="secondary-button" type="button" onclick={retakeCurrentShot}>
 						Foto Ulang
@@ -694,6 +770,28 @@
 					</button>
 				{/if}
 			</div>
+
+			{#if shareError}
+				<p class="share-error" role="alert">{shareError}</p>
+			{/if}
+
+			{#if qrCodeUrl && shareUrl}
+				<section class="share-card" aria-live="polite">
+					<img src={qrCodeUrl} alt="QR code untuk mengunduh foto" />
+					<div>
+						<h2>scan buat unduh di HP</h2>
+						<p>Link dan foto akan kedaluwarsa dalam 24 jam.</p>
+						<div class="share-actions">
+							<a class="secondary-button" href={shareUrl} target="_blank" rel="noreferrer">
+								Buka Link
+							</a>
+							<button class="secondary-button" type="button" onclick={copyShareLink}>
+								{shareCopied ? 'Link Disalin' : 'Salin Link'}
+							</button>
+						</div>
+					</div>
+				</section>
+			{/if}
 		</div>
 
 		<aside class:settings-open={showSettings} class="settings-panel">
@@ -1061,6 +1159,7 @@
 
 	.camera-actions {
 		display: flex;
+		flex-wrap: wrap;
 		justify-content: center;
 		gap: 0.75rem;
 		margin-top: 1.75rem;
@@ -1070,12 +1169,76 @@
 		margin-top: 0;
 	}
 
+	.share-error {
+		margin: 1rem 0 0;
+		color: #923441;
+		text-align: center;
+	}
+
+	.share-card {
+		display: grid;
+		grid-template-columns: minmax(9rem, 12rem) 1fr;
+		align-items: center;
+		gap: 1.25rem;
+		margin-top: 1.5rem;
+		border: 2px solid rgb(200 73 90 / 24%);
+		border-radius: 1.25rem;
+		background: rgb(255 255 255 / 34%);
+		padding: 1rem;
+	}
+
+	.share-card > img {
+		display: block;
+		width: 100%;
+		border-radius: 0.75rem;
+	}
+
+	.share-card h2 {
+		margin: 0;
+		font-size: clamp(1.75rem, 5vw, 2.6rem);
+		font-weight: 400;
+		line-height: 1;
+	}
+
+	.share-card p {
+		margin: 0.5rem 0 0;
+		color: var(--color-sage);
+	}
+
+	.share-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.65rem;
+		margin-top: 1rem;
+	}
+
+	.share-actions :global(.secondary-button) {
+		min-height: 2.75rem;
+		padding: 0.55rem 1rem;
+	}
+
 	.settings-panel {
 		overflow: hidden;
 		border: 2px solid rgb(200 73 90 / 32%);
 		border-radius: 1.25rem;
 		background: rgb(255 255 255 / 30%);
 		box-shadow: 0 8px 0 rgb(200 73 90 / 12%);
+	}
+
+	@media (max-width: 42rem) {
+		.share-card {
+			grid-template-columns: 1fr;
+			justify-items: center;
+			text-align: center;
+		}
+
+		.share-card > img {
+			width: min(100%, 13rem);
+		}
+
+		.share-actions {
+			justify-content: center;
+		}
 	}
 
 	.settings-toggle {

@@ -1,0 +1,17 @@
+{
+	"name": "red-tulip-photobox",
+	"compatibility_date": "2026-06-12",
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "red-tulip-photobox",
+			"database_id": "PASTE_D1_DATABASE_ID_HERE"
+		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "PHOTOS",
+			"bucket_name": "red-tulip-photobox"
+		}
+	]
+}

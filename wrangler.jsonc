@@ -1,0 +1,17 @@
+{
+	"name": "red-tulip-photobox",
+	"compatibility_date": "2026-06-12",
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "photobox_stendhal",
+			"database_id": "2096cb91-86e5-4595-8546-6463b883732c"
+		}
+	],
+	"r2_buckets": [
+		{
+			"binding": "PHOTOS",
+			"bucket_name": "photobox"
+		}
+	]
+}
