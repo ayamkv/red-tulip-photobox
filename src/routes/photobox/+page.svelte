@@ -1,6 +1,7 @@
 <script lang="ts">
+	import gsap from 'gsap';
 	import QRCode from 'qrcode';
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 
 	type FilterId = 'natural' | 'warm' | 'mono' | 'dreamy';
 	type SignaturePosition = 'left' | 'center' | 'right';
@@ -8,6 +9,13 @@
 	type FacingMode = 'user' | 'environment';
 	type FrameFormat = 'landscape' | 'portrait' | 'multiCream' | 'multiPink';
 	type PhotoSlot = { x: number; y: number; width: number; height: number };
+	type RecentPhoto = {
+		id: string;
+		createdAt: number;
+		expiresAt: number;
+		shareUrl: string;
+		fileUrl: string;
+	};
 	type FrameConfig = {
 		label: string;
 		url: string;
@@ -102,6 +110,12 @@
 	let shareUrl = $state('');
 	let qrCodeUrl = $state('');
 	let shareCopied = $state(false);
+	let recentPhotos = $state<RecentPhoto[]>([]);
+	let recentPhotosError = $state('');
+	let isLoadingRecentPhotos = $state(false);
+	let showAllRecentPhotos = $state(false);
+	let recentPhotosGrid = $state<HTMLElement>();
+	let recentPhotosSection = $state<HTMLElement>();
 
 	let activeFilter = $derived(filters.find((filter) => filter.id === selectedFilter) ?? filters[0]);
 	let activeFrame = $derived(frames[frameFormat]);
@@ -122,6 +136,18 @@
 	let previewFilter = $derived(
 		`${activeFilter.css === 'none' ? '' : activeFilter.css} brightness(${brightness}%)`.trim()
 	);
+	let visibleRecentPhotos = $derived(
+		showAllRecentPhotos ? recentPhotos : recentPhotos.slice(0, 6)
+	);
+
+	$effect(() => {
+		const photoCount = visibleRecentPhotos.length;
+		const expanded = showAllRecentPhotos;
+
+		if (!photoCount || !recentPhotosGrid) return;
+
+		void tick().then(() => animateRecentPhotos(expanded));
+	});
 
 	function revokeUrl(url: string) {
 		if (url.startsWith('blob:')) URL.revokeObjectURL(url);
@@ -132,6 +158,62 @@
 		shareUrl = '';
 		qrCodeUrl = '';
 		shareCopied = false;
+	}
+
+	function animateRecentPhotos(expanded = false) {
+		if (!recentPhotosGrid) return;
+
+		const cards = recentPhotosGrid.querySelectorAll('[data-recent-photo]');
+		if (!cards.length) return;
+		if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+			gsap.set(cards, { clearProps: 'all' });
+			return;
+		}
+
+		gsap.fromTo(
+			cards,
+			{ autoAlpha: 0, y: expanded ? 22 : 14, scale: 0.96 },
+			{
+				autoAlpha: 1,
+				y: 0,
+				scale: 1,
+				duration: 0.45,
+				ease: 'power2.out',
+				stagger: 0.045,
+				overwrite: true
+			}
+		);
+	}
+
+	function addRecentPhoto(photo: RecentPhoto) {
+		recentPhotos = [photo, ...recentPhotos.filter((item) => item.id !== photo.id)].slice(0, 96);
+		recentPhotosError = '';
+	}
+
+	async function loadRecentPhotos() {
+		isLoadingRecentPhotos = true;
+		recentPhotosError = '';
+
+		try {
+			const response = await fetch('/api/photos?limit=96');
+			const result = (await response.json()) as {
+				message?: string;
+				photos?: RecentPhoto[];
+			};
+
+			if (!response.ok || !result.photos) {
+				throw new Error(result.message ?? 'Recent photos belum bisa dibuka.');
+			}
+
+			recentPhotos = result.photos;
+		} catch (cause) {
+			recentPhotosError =
+				cause instanceof Error && cause.message !== 'Failed to fetch'
+					? cause.message
+					: 'Recent photos belum bisa dibuka.';
+		} finally {
+			isLoadingRecentPhotos = false;
+		}
 	}
 
 	function clearCapturedMedia() {
@@ -477,6 +559,7 @@
 				shotUrls = [capturedShot];
 				await renderPhoto([capturedShot]);
 				stopCamera();
+				await publishCurrentPhoto();
 			}
 		} catch {
 			cameraError = 'Foto gagal diproses. Muat ulang halaman lalu coba lagi.';
@@ -507,6 +590,7 @@
 		if (nextShots.length === totalCaptureSteps) {
 			await renderPhoto(nextShots);
 			stopCamera();
+			await publishCurrentPhoto();
 		} else {
 			requestAnimationFrame(() => void syncPreviewVideos());
 		}
@@ -521,6 +605,61 @@
 		if (photoUrl) await renderPhoto();
 	}
 
+	async function uploadCurrentPhoto() {
+		if (!photoUrl) return null;
+
+		const photo = await fetch(photoUrl).then((response) => response.blob());
+		const response = await fetch('/api/photos', {
+			method: 'POST',
+			headers: { 'content-type': 'image/png' },
+			body: photo
+		});
+		const result = (await response.json()) as {
+			message?: string;
+			id?: string;
+			createdAt?: number;
+			expiresAt?: number;
+			shareUrl?: string;
+			fileUrl?: string;
+		};
+
+		if (!response.ok || !result.id || !result.shareUrl || !result.fileUrl || !result.expiresAt) {
+			throw new Error(result.message ?? 'Foto gagal dipublish.');
+		}
+
+		const recentPhoto: RecentPhoto = {
+			id: result.id,
+			createdAt: result.createdAt ?? Math.floor(Date.now() / 1000),
+			expiresAt: result.expiresAt,
+			shareUrl: result.shareUrl,
+			fileUrl: result.fileUrl
+		};
+
+		shareUrl = recentPhoto.shareUrl;
+		addRecentPhoto(recentPhoto);
+		return recentPhoto;
+	}
+
+	async function publishCurrentPhoto({ surfaceError = false } = {}) {
+		if (!photoUrl || isSharing || shareUrl) return;
+
+		isSharing = true;
+		shareCopied = false;
+
+		try {
+			await uploadCurrentPhoto();
+		} catch (cause) {
+			const message =
+				cause instanceof Error && cause.message !== 'Failed to fetch'
+					? cause.message
+					: 'Foto gagal dipublish. Coba lagi sebentar.';
+			if (surfaceError) shareError = message;
+			else recentPhotosError = message;
+		} finally {
+			isSharing = false;
+		}
+	}
+
 	async function createPhotoShare() {
 		if (!photoUrl || isSharing) return;
 
@@ -529,22 +668,14 @@
 		shareCopied = false;
 
 		try {
-			const photo = await fetch(photoUrl).then((response) => response.blob());
-			const response = await fetch('/api/photos', {
-				method: 'POST',
-				headers: { 'content-type': 'image/png' },
-				body: photo
-			});
-			const result = (await response.json()) as {
-				message?: string;
-				shareUrl?: string;
-			};
-
-			if (!response.ok || !result.shareUrl) {
-				throw new Error(result.message ?? 'QR gagal dibuat.');
+			if (!shareUrl) {
+				await uploadCurrentPhoto();
 			}
 
-			shareUrl = result.shareUrl;
+			if (!shareUrl) {
+				throw new Error('QR gagal dibuat.');
+			}
+
 			qrCodeUrl = await QRCode.toDataURL(shareUrl, {
 				width: 320,
 				margin: 2,
@@ -589,6 +720,19 @@
 
 	onMount(() => {
 		startCamera();
+		void loadRecentPhotos();
+
+		if (
+			recentPhotosSection &&
+			!window.matchMedia('(prefers-reduced-motion: reduce)').matches
+		) {
+			gsap.fromTo(
+				recentPhotosSection,
+				{ autoAlpha: 0, y: 18 },
+				{ autoAlpha: 1, y: 0, duration: 0.5, ease: 'power2.out', delay: 0.1 }
+			);
+		}
+
 		return () => {
 			stopCamera();
 			clearCapturedMedia();
@@ -792,6 +936,53 @@
 					</div>
 				</section>
 			{/if}
+
+			<section bind:this={recentPhotosSection} class="recent-photos" aria-live="polite">
+				<div class="recent-photos-heading">
+					<div>
+						<p>recent photos</p>
+						<h2>foto yang baru masuk</h2>
+					</div>
+
+					{#if recentPhotos.length > 6}
+						<button
+							class="secondary-button recent-toggle"
+							type="button"
+							aria-expanded={showAllRecentPhotos}
+							onclick={() => (showAllRecentPhotos = !showAllRecentPhotos)}
+						>
+							{showAllRecentPhotos ? 'Tutup Grid' : 'Lihat Semua'}
+						</button>
+					{/if}
+				</div>
+
+				{#if isLoadingRecentPhotos}
+					<p class="recent-empty">loading recent photos...</p>
+				{:else if recentPhotosError}
+					<p class="recent-empty" role="alert">{recentPhotosError}</p>
+				{:else if recentPhotos.length}
+					<div
+						bind:this={recentPhotosGrid}
+						class:expanded={showAllRecentPhotos}
+						class="recent-photo-grid"
+					>
+						{#each visibleRecentPhotos as photo (photo.id)}
+							<a
+								data-recent-photo
+								class="recent-photo-card"
+								href={photo.shareUrl}
+								target="_blank"
+								rel="noreferrer"
+								aria-label="Buka foto terbaru Red Tulip Photobox"
+							>
+								<img src={photo.fileUrl} alt="Foto terbaru Red Tulip Photobox" loading="lazy" />
+							</a>
+						{/each}
+					</div>
+				{:else}
+					<p class="recent-empty">belum ada foto publik. ambil satu dulu.</p>
+				{/if}
+			</section>
 		</div>
 
 		<aside class:settings-open={showSettings} class="settings-panel">
@@ -1217,6 +1408,86 @@
 		padding: 0.55rem 1rem;
 	}
 
+	.recent-photos {
+		margin-top: 1.5rem;
+		border: 2px solid rgb(200 73 90 / 24%);
+		border-radius: 1.25rem;
+		background: rgb(255 255 255 / 30%);
+		padding: clamp(1rem, 3vw, 1.35rem);
+		box-shadow: 0 8px 0 rgb(200 73 90 / 10%);
+	}
+
+	.recent-photos-heading {
+		display: flex;
+		align-items: end;
+		justify-content: space-between;
+		gap: 1rem;
+		margin-bottom: 1rem;
+	}
+
+	.recent-photos-heading p {
+		margin: 0;
+		color: var(--color-sage);
+		font-size: 1rem;
+	}
+
+	.recent-photos-heading h2 {
+		margin: 0.2rem 0 0;
+		font-size: clamp(1.9rem, 5vw, 3rem);
+		font-weight: 400;
+		line-height: 1;
+	}
+
+	.recent-toggle {
+		min-height: 2.65rem;
+		padding: 0.5rem 1rem;
+		white-space: nowrap;
+	}
+
+	.recent-photo-grid {
+		display: grid;
+		grid-template-columns: repeat(6, minmax(0, 1fr));
+		gap: 0.65rem;
+	}
+
+	.recent-photo-grid.expanded {
+		grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr));
+	}
+
+	.recent-photo-card {
+		position: relative;
+		display: block;
+		overflow: hidden;
+		aspect-ratio: 1;
+		border: 2px solid rgb(200 73 90 / 22%);
+		border-radius: 0.9rem;
+		background: #24191b;
+		box-shadow: 0 5px 0 rgb(200 73 90 / 12%);
+		transform-origin: center;
+	}
+
+	.recent-photo-card img {
+		display: block;
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		transition: transform 180ms ease;
+	}
+
+	.recent-photo-card:hover img,
+	.recent-photo-card:focus-visible img {
+		transform: scale(1.04);
+	}
+
+	.recent-empty {
+		margin: 0;
+		border-radius: 0.9rem;
+		background: rgb(254 244 218 / 58%);
+		padding: 1rem;
+		color: var(--color-sage);
+		text-align: center;
+	}
+
 	.settings-panel {
 		overflow: hidden;
 		border: 2px solid rgb(200 73 90 / 32%);
@@ -1238,6 +1509,19 @@
 
 		.share-actions {
 			justify-content: center;
+		}
+
+		.recent-photos-heading {
+			display: block;
+		}
+
+		.recent-toggle {
+			width: 100%;
+			margin-top: 0.85rem;
+		}
+
+		.recent-photo-grid {
+			grid-template-columns: repeat(3, minmax(0, 1fr));
 		}
 	}
 

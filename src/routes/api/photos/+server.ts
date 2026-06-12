@@ -6,8 +6,46 @@ import {
 	createShareId,
 	enforceUploadLimit,
 	getBindings,
+	type PhotoShare,
 	removeExpiredShares
 } from '$lib/server/photo-shares';
+
+export const GET: RequestHandler = async ({ platform, url }) => {
+	const { DB, PHOTOS } = getBindings(platform);
+	const now = Math.floor(Date.now() / 1000);
+	const limitParam = Number(url.searchParams.get('limit') ?? 48);
+	const limit = Math.min(Math.max(Number.isFinite(limitParam) ? limitParam : 48, 1), 96);
+
+	const shares = await DB
+		.prepare(
+			`SELECT id, created_at, expires_at
+			 FROM photo_shares
+			 WHERE expires_at > ?
+			 ORDER BY created_at DESC
+			 LIMIT ?`
+		)
+		.bind(now, limit)
+		.all<Pick<PhotoShare, 'id' | 'created_at' | 'expires_at'>>();
+
+	platform?.ctx.waitUntil(removeExpiredShares(DB, PHOTOS));
+
+	return json(
+		{
+			photos: shares.results.map((share) => ({
+				id: share.id,
+				createdAt: share.created_at,
+				expiresAt: share.expires_at,
+				shareUrl: new URL(`/p/${share.id}`, url.origin).toString(),
+				fileUrl: new URL(`/p/${share.id}/file`, url.origin).toString()
+			}))
+		},
+		{
+			headers: {
+				'cache-control': 'no-store'
+			}
+		}
+	);
+};
 
 export const POST: RequestHandler = async ({ request, platform, url }) => {
 	const { DB, PHOTOS } = getBindings(platform);
@@ -64,6 +102,8 @@ export const POST: RequestHandler = async ({ request, platform, url }) => {
 		{
 			id,
 			shareUrl: new URL(`/p/${id}`, url.origin).toString(),
+			fileUrl: new URL(`/p/${id}/file`, url.origin).toString(),
+			createdAt,
 			expiresAt
 		},
 		{ status: 201 }
