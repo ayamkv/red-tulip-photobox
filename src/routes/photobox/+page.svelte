@@ -1,14 +1,16 @@
 <script lang="ts">
 	import gsap from 'gsap';
+	import { getStroke } from 'perfect-freehand';
 	import QRCode from 'qrcode';
 	import { onMount, tick } from 'svelte';
 
 	type FilterId = 'natural' | 'warm' | 'mono' | 'dreamy';
-	type SignaturePosition = 'left' | 'center' | 'right';
 	type SignatureColor = 'cream' | 'pink' | 'dark';
 	type FacingMode = 'user' | 'environment';
 	type FrameFormat = 'landscape' | 'portrait' | 'multiCream' | 'multiPink';
 	type PhotoSlot = { x: number; y: number; width: number; height: number };
+	type SignaturePoint = [number, number, number];
+	type SignaturePlacement = { x: number; y: number; width: number };
 	type RecentPhoto = {
 		id: string;
 		createdAt: number;
@@ -80,12 +82,21 @@
 		pink: '#fd72b6',
 		dark: '#4b292f'
 	};
+	const signaturePadWidth = 640;
+	const signaturePadHeight = 240;
+	const defaultSignaturePlacements: Record<FrameFormat, SignaturePlacement> = {
+		landscape: { x: 50, y: 76, width: 36 },
+		portrait: { x: 50, y: 76, width: 42 },
+		multiCream: { x: 34, y: 59.2, width: 25 },
+		multiPink: { x: 34, y: 59.2, width: 25 }
+	};
 
 	let video = $state<HTMLVideoElement>();
 	let multiVideoOne = $state<HTMLVideoElement>();
 	let multiVideoTwo = $state<HTMLVideoElement>();
 	let multiVideoThree = $state<HTMLVideoElement>();
 	let canvas = $state<HTMLCanvasElement>();
+	let signaturePad = $state<HTMLCanvasElement>();
 	let stream: MediaStream | null = null;
 	let demoCanvas: HTMLCanvasElement | null = null;
 	let photoUrl = $state('');
@@ -102,9 +113,17 @@
 	let timerSeconds = $state(3);
 	let countdown = $state(0);
 	let frameFormat = $state<FrameFormat>('landscape');
-	let signature = $state('');
-	let signaturePosition = $state<SignaturePosition>('center');
+	let showSignatureModal = $state(false);
+	let signatureStrokes = $state<SignaturePoint[][]>([]);
+	let currentSignatureStroke = $state<SignaturePoint[]>([]);
+	let signaturePath = $state('');
+	let signaturePlacements = $state<Record<FrameFormat, SignaturePlacement>>({
+		...defaultSignaturePlacements
+	});
 	let signatureColor = $state<SignatureColor>('cream');
+	let isDrawingSignature = false;
+	let isDraggingSignature = false;
+	let pendingSignatureAction: 'capture' | null = null;
 	let isSharing = $state(false);
 	let shareError = $state('');
 	let shareUrl = $state('');
@@ -119,11 +138,12 @@
 
 	let activeFilter = $derived(filters.find((filter) => filter.id === selectedFilter) ?? filters[0]);
 	let activeFrame = $derived(frames[frameFormat]);
-	let signatureText = $derived(
-		signature.trim() ? `Berdasteran with ${signature.trim()}` : ''
+	let activeSignaturePlacement = $derived(signaturePlacements[frameFormat]);
+	let signatureImageUrl = $derived(
+		signaturePath ? createSignatureSvg(signaturePath, signatureColors[signatureColor]) : ''
 	);
-	let renderedSignatureText = $derived(
-		activeFrame.hasSignaturePrefix ? signature.trim() : signatureText
+	let signatureOverlayStyle = $derived(
+		`left: ${activeSignaturePlacement.x}%; top: ${activeSignaturePlacement.y}%; width: ${activeSignaturePlacement.width}%;`
 	);
 	let captureSlots = $derived(
 		activeFrame.kind === 'multi'
@@ -158,6 +178,188 @@
 		shareUrl = '';
 		qrCodeUrl = '';
 		shareCopied = false;
+	}
+
+	function clamp(value: number, min: number, max: number) {
+		return Math.min(Math.max(value, min), max);
+	}
+
+	function strokeToPath(stroke: number[][]) {
+		if (!stroke.length) return '';
+
+		const path = stroke.map(([x, y], index, points) => {
+			const [nextX, nextY] = points[(index + 1) % points.length];
+			const command = index === 0 ? 'M' : 'Q';
+			return `${command} ${x.toFixed(2)} ${y.toFixed(2)} ${((x + nextX) / 2).toFixed(2)} ${((y + nextY) / 2).toFixed(2)}`;
+		});
+
+		return `${path.join(' ')} Z`;
+	}
+
+	function getSignaturePath(strokes: SignaturePoint[][]) {
+		return strokes
+			.map((stroke) =>
+				strokeToPath(
+					getStroke(stroke, {
+						size: 16,
+						thinning: 0.62,
+						smoothing: 0.58,
+						streamline: 0.5,
+						simulatePressure: true
+					})
+				)
+			)
+			.filter(Boolean)
+			.join(' ');
+	}
+
+	function createSignatureSvg(path: string, color: string) {
+		const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${signaturePadWidth} ${signaturePadHeight}"><path d="${path}" fill="${color}"/></svg>`;
+		return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+	}
+
+	function drawSignaturePath(context: CanvasRenderingContext2D, path: string, color: string) {
+		context.clearRect(0, 0, signaturePadWidth, signaturePadHeight);
+		context.fillStyle = color;
+
+		if (!path) return;
+
+		context.fill(new Path2D(path));
+	}
+
+	function redrawSignaturePad() {
+		if (!signaturePad) return;
+
+		const context = signaturePad.getContext('2d');
+		if (!context) return;
+
+		drawSignaturePath(
+			context,
+			getSignaturePath([...signatureStrokes, currentSignatureStroke]),
+			'#4b292f'
+		);
+	}
+
+	async function openSignatureModal(action: 'capture' | null = null) {
+		pendingSignatureAction = action;
+		showSignatureModal = true;
+		await tick();
+		redrawSignaturePad();
+	}
+
+	function closeSignatureModal() {
+		showSignatureModal = false;
+		pendingSignatureAction = null;
+		isDrawingSignature = false;
+		currentSignatureStroke = [];
+	}
+
+	function getSignaturePoint(event: PointerEvent): SignaturePoint {
+		const target = event.currentTarget as HTMLCanvasElement;
+		const rect = target.getBoundingClientRect();
+		const pressure = event.pressure > 0 ? event.pressure : 0.5;
+
+		return [
+			((event.clientX - rect.left) / rect.width) * signaturePadWidth,
+			((event.clientY - rect.top) / rect.height) * signaturePadHeight,
+			pressure
+		];
+	}
+
+	function startSignatureStroke(event: PointerEvent) {
+		if (!signaturePad) return;
+
+		event.preventDefault();
+		signaturePad.setPointerCapture(event.pointerId);
+		isDrawingSignature = true;
+		currentSignatureStroke = [getSignaturePoint(event)];
+		redrawSignaturePad();
+	}
+
+	function moveSignatureStroke(event: PointerEvent) {
+		if (!isDrawingSignature) return;
+
+		event.preventDefault();
+		currentSignatureStroke = [...currentSignatureStroke, getSignaturePoint(event)];
+		redrawSignaturePad();
+	}
+
+	function endSignatureStroke(event: PointerEvent) {
+		if (!isDrawingSignature) return;
+
+		event.preventDefault();
+		isDrawingSignature = false;
+		signatureStrokes = [...signatureStrokes, currentSignatureStroke];
+		currentSignatureStroke = [];
+		redrawSignaturePad();
+	}
+
+	function clearSignaturePad() {
+		signatureStrokes = [];
+		currentSignatureStroke = [];
+		signaturePath = '';
+		redrawSignaturePad();
+	}
+
+	async function saveSignature() {
+		const nextPath = getSignaturePath(signatureStrokes);
+		if (!nextPath) return;
+
+		signaturePath = nextPath;
+		showSignatureModal = false;
+		clearShareState();
+
+		if (photoUrl) await renderPhoto();
+
+		if (pendingSignatureAction === 'capture') {
+			pendingSignatureAction = null;
+			await takePhoto();
+		}
+	}
+
+	function updateSignaturePlacement(nextPlacement: Partial<SignaturePlacement>) {
+		signaturePlacements = {
+			...signaturePlacements,
+			[frameFormat]: {
+				...signaturePlacements[frameFormat],
+				...nextPlacement
+			}
+		};
+	}
+
+	async function renderPhotoIfReady() {
+		if (photoUrl) await renderPhoto();
+	}
+
+	function moveSignatureOverlay(event: PointerEvent) {
+		const target = event.currentTarget as HTMLElement;
+		const parent = target.parentElement;
+		if (!parent) return;
+
+		const rect = parent.getBoundingClientRect();
+		updateSignaturePlacement({
+			x: clamp(((event.clientX - rect.left) / rect.width) * 100, 8, 92),
+			y: clamp(((event.clientY - rect.top) / rect.height) * 100, 8, 92)
+		});
+	}
+
+	function startDraggingSignature(event: PointerEvent) {
+		event.preventDefault();
+		isDraggingSignature = true;
+		(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+		moveSignatureOverlay(event);
+	}
+
+	function dragSignature(event: PointerEvent) {
+		if (!isDraggingSignature) return;
+		moveSignatureOverlay(event);
+	}
+
+	async function stopDraggingSignature() {
+		if (!isDraggingSignature) return;
+
+		isDraggingSignature = false;
+		await renderPhotoIfReady();
 	}
 
 	function animateRecentPhotos(expanded = false) {
@@ -455,39 +657,20 @@
 		context.restore();
 	}
 
-	function drawSignature(context: CanvasRenderingContext2D, width: number, height: number) {
-		if (!renderedSignatureText) return;
+	async function drawSignature(context: CanvasRenderingContext2D, width: number, height: number) {
+		if (!signatureImageUrl) return;
 
-		if (activeFrame.hasSignaturePrefix) {
-			context.save();
-			context.font = "58px 'Mea Culpa', cursive";
-			context.textAlign = 'left';
-			context.textBaseline = 'middle';
-			context.fillStyle = signatureColors[signatureColor];
-			context.shadowColor = 'rgb(36 25 27 / 55%)';
-			context.shadowBlur = 8;
-			context.shadowOffsetY = 3;
-			context.fillText(renderedSignatureText, 224, height * 0.592, width * 0.36);
-			context.restore();
-			return;
-		}
-
-		const positions: Record<SignaturePosition, { x: number; align: CanvasTextAlign }> = {
-			left: { x: width * 0.12, align: 'left' },
-			center: { x: width * 0.5, align: 'center' },
-			right: { x: width * 0.88, align: 'right' }
-		};
-		const position = positions[signaturePosition];
+		const signatureImage = await loadImage(signatureImageUrl);
+		const signatureWidth = width * (activeSignaturePlacement.width / 100);
+		const signatureHeight = signatureWidth * (signaturePadHeight / signaturePadWidth);
+		const signatureX = width * (activeSignaturePlacement.x / 100) - signatureWidth / 2;
+		const signatureY = height * (activeSignaturePlacement.y / 100) - signatureHeight / 2;
 
 		context.save();
-		context.font = "58px 'Mea Culpa', cursive";
-		context.textAlign = position.align;
-		context.textBaseline = 'middle';
-		context.fillStyle = signatureColors[signatureColor];
 		context.shadowColor = 'rgb(36 25 27 / 55%)';
 		context.shadowBlur = 8;
 		context.shadowOffsetY = 3;
-		context.fillText(renderedSignatureText, position.x, height * 0.76, width * 0.72);
+		context.drawImage(signatureImage, signatureX, signatureY, signatureWidth, signatureHeight);
 		context.restore();
 	}
 
@@ -510,8 +693,7 @@
 
 			const frame = await loadImage(activeFrame.url);
 			context.drawImage(frame, 0, 0, width, height);
-			await document.fonts.load("58px 'Mea Culpa'");
-			drawSignature(context, width, height);
+			await drawSignature(context, width, height);
 
 			const blob = await canvasToBlob(canvasElement);
 			const nextPhotoUrl = URL.createObjectURL(blob);
@@ -567,6 +749,15 @@
 			countdown = 0;
 			isCapturing = false;
 		}
+	}
+
+	async function requestPhotoCapture() {
+		if (!signaturePath) {
+			await openSignatureModal('capture');
+			return;
+		}
+
+		await takePhoto();
 	}
 
 	function retake() {
@@ -713,8 +904,10 @@
 		mirrorPhoto = true;
 		timerSeconds = 3;
 		frameFormat = 'landscape';
-		signature = '';
-		signaturePosition = 'center';
+		signatureStrokes = [];
+		currentSignatureStroke = [];
+		signaturePath = '';
+		signaturePlacements = { ...defaultSignaturePlacements };
 		signatureColor = 'cream';
 	}
 
@@ -846,14 +1039,19 @@
 
 						<img class="camera-frame" src={activeFrame.url} alt="" aria-hidden="true" />
 
-						{#if renderedSignatureText}
-							<p
-								class="signature-preview signature-{signaturePosition}"
-								class:signature-built-in={activeFrame.hasSignaturePrefix}
-								style:color={signatureColors[signatureColor]}
+						{#if signatureImageUrl}
+							<button
+								class="signature-preview"
+								style={signatureOverlayStyle}
+								type="button"
+								aria-label="Geser tanda tangan"
+								onpointerdown={startDraggingSignature}
+								onpointermove={dragSignature}
+								onpointerup={stopDraggingSignature}
+								onpointercancel={stopDraggingSignature}
 							>
-								{renderedSignatureText}
-							</p>
+								<img src={signatureImageUrl} alt="" />
+							</button>
 						{/if}
 
 						{#if activeFrame.kind !== 'multi' && countdown > 0}
@@ -901,7 +1099,7 @@
 					<button
 						class="primary-button"
 						type="button"
-						onclick={takePhoto}
+						onclick={requestPhotoCapture}
 						disabled={!cameraReady || isCapturing}
 					>
 						{#if isCapturing}
@@ -1071,44 +1269,81 @@
 
 					<fieldset class="signature-settings">
 						<legend>Tanda tangan</legend>
-						<label class="control">
-							<span>Teks setelah “Berdasteran with”</span>
-							<input
-								bind:value={signature}
-								type="text"
-								maxlength="30"
-								placeholder="contoh: Ayam"
-								onchange={() => renderPhoto()}
-							/>
-						</label>
+						<div class="signature-control-card">
+							<p>
+								Tanda tangan setelah “Berdasteran with” digambar manual biar masuk ke final image.
+							</p>
+							<button class="secondary-button" type="button" onclick={() => openSignatureModal()}>
+								{signaturePath ? 'Ubah Tanda Tangan' : 'Buat Tanda Tangan'}
+							</button>
+						</div>
 
 						<div class="settings-row">
 							<label class="control">
-								<span>Posisi</span>
-								<select bind:value={signaturePosition} onchange={() => renderPhoto()}>
-									<option value="left">Kiri</option>
-									<option value="center">Tengah</option>
-									<option value="right">Kanan</option>
-								</select>
+								<span>X <output>{Math.round(activeSignaturePlacement.x)}%</output></span>
+								<input
+									value={activeSignaturePlacement.x}
+									type="range"
+									min="8"
+									max="92"
+									step="1"
+									oninput={(event) =>
+										updateSignaturePlacement({
+											x: Number((event.currentTarget as HTMLInputElement).value)
+										})}
+									onchange={renderPhotoIfReady}
+								/>
 							</label>
 
-							<div class="control">
-								<span>Warna</span>
-								<div class="color-options">
-									{#each Object.entries(signatureColors) as [color, value]}
-										<button
-											class:active={signatureColor === color}
-											type="button"
-											aria-label={`Warna tanda tangan ${color}`}
-											aria-pressed={signatureColor === color}
-											style:background={value}
-											onclick={async () => {
-												signatureColor = color as SignatureColor;
-												if (photoUrl) await renderPhoto();
-											}}
-										></button>
-									{/each}
-								</div>
+							<label class="control">
+								<span>Y <output>{Math.round(activeSignaturePlacement.y)}%</output></span>
+								<input
+									value={activeSignaturePlacement.y}
+									type="range"
+									min="8"
+									max="92"
+									step="1"
+									oninput={(event) =>
+										updateSignaturePlacement({
+											y: Number((event.currentTarget as HTMLInputElement).value)
+										})}
+									onchange={renderPhotoIfReady}
+								/>
+							</label>
+						</div>
+
+						<label class="control">
+							<span>Ukuran <output>{Math.round(activeSignaturePlacement.width)}%</output></span>
+							<input
+								value={activeSignaturePlacement.width}
+								type="range"
+								min="14"
+								max="58"
+								step="1"
+								oninput={(event) =>
+									updateSignaturePlacement({
+										width: Number((event.currentTarget as HTMLInputElement).value)
+									})}
+								onchange={renderPhotoIfReady}
+							/>
+						</label>
+
+						<div class="control">
+							<span>Warna</span>
+							<div class="color-options">
+								{#each Object.entries(signatureColors) as [color, value]}
+									<button
+										class:active={signatureColor === color}
+										type="button"
+										aria-label={`Warna tanda tangan ${color}`}
+										aria-pressed={signatureColor === color}
+										style:background={value}
+										onclick={async () => {
+											signatureColor = color as SignatureColor;
+											await renderPhotoIfReady();
+										}}
+									></button>
+								{/each}
 							</div>
 						</div>
 					</fieldset>
@@ -1120,6 +1355,46 @@
 	</div>
 
 	<canvas bind:this={canvas} hidden></canvas>
+
+	{#if showSignatureModal}
+		<div class="signature-modal-backdrop" role="presentation">
+			<div class="signature-modal" role="dialog" aria-modal="true" aria-labelledby="signature-title">
+				<div class="signature-modal-heading">
+					<div>
+						<p>Tanda tangan</p>
+						<h2 id="signature-title">Tulis signature kamu</h2>
+					</div>
+					<button type="button" aria-label="Tutup modal tanda tangan" onclick={closeSignatureModal}>
+						×
+					</button>
+				</div>
+
+				<canvas
+					bind:this={signaturePad}
+					class="signature-pad"
+					width={signaturePadWidth}
+					height={signaturePadHeight}
+					aria-label="Area menggambar tanda tangan"
+					onpointerdown={startSignatureStroke}
+					onpointermove={moveSignatureStroke}
+					onpointerup={endSignatureStroke}
+					onpointercancel={endSignatureStroke}
+				></canvas>
+
+				<p class="signature-modal-help">
+					Gambar pakai mouse, trackpad, atau jari. Nanti bisa digeser langsung di atas photobox.
+				</p>
+
+				<div class="signature-modal-actions">
+					<button class="secondary-button" type="button" onclick={clearSignaturePad}>Ulangi</button>
+					<button class="secondary-button" type="button" onclick={closeSignatureModal}>Batal</button>
+					<button class="primary-button" type="button" disabled={!signatureStrokes.length} onclick={saveSignature}>
+						Pakai Tanda Tangan
+					</button>
+				</div>
+			</div>
+		</div>
+	{/if}
 </main>
 
 <style>
@@ -1272,40 +1547,24 @@
 
 	.signature-preview {
 		position: absolute;
-		z-index: 2;
-		bottom: 18%;
-		max-width: 55%;
-		overflow: hidden;
-		margin: 0;
-		font-family: var(--font-mea-culpa);
-		font-size: clamp(1.35rem, 4.2vw, 3.4rem);
-		line-height: 1;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		text-shadow: 0 3px 8px rgb(36 25 27 / 55%);
+		z-index: 3;
+		border: 0;
+		background: transparent;
+		padding: 0;
+		filter: drop-shadow(0 3px 8px rgb(36 25 27 / 55%));
+		cursor: grab;
+		touch-action: none;
+		transform: translate(-50%, -50%);
+	}
+
+	.signature-preview:active {
+		cursor: grabbing;
+	}
+
+	.signature-preview img {
+		display: block;
+		width: 100%;
 		pointer-events: none;
-	}
-
-	.signature-built-in {
-		top: 58.1%;
-		bottom: auto;
-		left: 20.75%;
-		max-width: 36%;
-		transform: none;
-		font-size: clamp(1.25rem, 4vw, 3.35rem);
-	}
-
-	.signature-left {
-		left: 12%;
-	}
-
-	.signature-center {
-		left: 50%;
-		transform: translateX(-50%);
-	}
-
-	.signature-right {
-		right: 12%;
 	}
 
 	.countdown {
@@ -1660,7 +1919,6 @@
 		min-width: 0;
 	}
 
-	.control input[type='text'],
 	.control select {
 		width: 100%;
 		min-height: 2.65rem;
@@ -1702,6 +1960,115 @@
 		gap: 0.85rem;
 		border-top: 1px solid rgb(200 73 90 / 20%);
 		padding-top: 1rem;
+	}
+
+	.signature-control-card {
+		display: grid;
+		gap: 0.75rem;
+		border: 1px solid rgb(200 73 90 / 20%);
+		border-radius: 0.9rem;
+		background: rgb(254 244 218 / 48%);
+		padding: 0.85rem;
+	}
+
+	.signature-control-card p {
+		margin: 0;
+		color: var(--color-sage);
+		font-size: 0.95rem;
+		line-height: 1.35;
+	}
+
+	.signature-control-card :global(.secondary-button) {
+		min-height: 2.65rem;
+		padding: 0.55rem 1rem;
+	}
+
+	.signature-modal-backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: 20;
+		display: grid;
+		place-items: center;
+		background: rgb(36 25 27 / 62%);
+		padding: 1rem;
+	}
+
+	.signature-modal {
+		width: min(100%, 44rem);
+		border: 2px solid rgb(200 73 90 / 30%);
+		border-radius: 1.35rem;
+		background: var(--color-cream);
+		padding: clamp(1rem, 3vw, 1.35rem);
+		box-shadow: 0 16px 0 rgb(36 25 27 / 20%);
+	}
+
+	.signature-modal-heading {
+		display: flex;
+		align-items: start;
+		justify-content: space-between;
+		gap: 1rem;
+		margin-bottom: 1rem;
+	}
+
+	.signature-modal-heading p,
+	.signature-modal-help {
+		margin: 0;
+		color: var(--color-sage);
+	}
+
+	.signature-modal-heading h2 {
+		margin: 0.15rem 0 0;
+		font-size: clamp(2rem, 6vw, 3.4rem);
+		font-weight: 400;
+		line-height: 0.95;
+	}
+
+	.signature-modal-heading button {
+		border: 0;
+		background: transparent;
+		color: var(--color-tulip);
+		font-size: 2rem;
+		line-height: 1;
+		cursor: pointer;
+	}
+
+	.signature-pad {
+		display: block;
+		width: 100%;
+		aspect-ratio: 640 / 240;
+		border: 2px dashed rgb(200 73 90 / 34%);
+		border-radius: 1rem;
+		background:
+			linear-gradient(rgb(254 244 218 / 88%), rgb(254 244 218 / 88%)),
+			linear-gradient(135deg, rgb(251 144 195 / 20%), rgb(123 180 134 / 20%));
+		touch-action: none;
+		cursor: crosshair;
+	}
+
+	.signature-modal-help {
+		margin-top: 0.75rem;
+		font-size: 0.95rem;
+		line-height: 1.35;
+	}
+
+	.signature-modal-actions {
+		display: flex;
+		flex-wrap: wrap;
+		justify-content: end;
+		gap: 0.65rem;
+		margin-top: 1rem;
+	}
+
+	.signature-modal-actions :global(.primary-button),
+	.signature-modal-actions :global(.secondary-button) {
+		min-height: 2.75rem;
+		margin-top: 0;
+		padding: 0.55rem 1rem;
+	}
+
+	.signature-modal-actions :global(.primary-button:disabled) {
+		opacity: 0.55;
+		cursor: not-allowed;
 	}
 
 	.color-options {
