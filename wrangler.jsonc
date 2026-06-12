@@ -1,6 +1,7 @@
 {
 	"name": "red-tulip-photobox",
 	"compatibility_date": "2026-06-12",
+	"pages_build_output_dir": ".svelte-kit/cloudflare",
 	"d1_databases": [
 		{
 			"binding": "DB",
